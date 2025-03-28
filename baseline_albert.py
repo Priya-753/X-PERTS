@@ -7,42 +7,30 @@ Original file is located at
     https://colab.research.google.com/drive/14Wk5_tat5eIkosITYXD6s2-pRl8CfMc3
 """
 
-!pip install torch transformers datasets
-
-!git config --global credential.helper store
-
-!huggingface-cli login
-
 import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer, OPTForSequenceClassification
+from transformers import AutoTokenizer, AlbertForSequenceClassification
+from transformers import AutoTokenizer, GPT2ForSequenceClassification
+import time
+from sklearn.metrics import classification_report
 
 dataset = load_dataset("./sentiment140.py", name="sentiment140")
 
 from huggingface_hub import login
 token = ""
 
-model_name = "facebook/opt-125m"
 num_labels = 2
+model_name = "albert-base-v2"
 tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
-model = OPTForSequenceClassification.from_pretrained(model_name, num_labels=num_labels, token=token)
+model = AlbertForSequenceClassification.from_pretrained(model_name, num_labels=num_labels, token=token)
 
 def map_labels(example):
     example["sentiment"] = 0 if example["sentiment"] == 0 else 1
     return example
 
 dataset = dataset.map(map_labels)
-
-len(dataset['train'])
-
-# Get the actual size of each split
-train_sample_size = min(500000, len(dataset["train"]))
-test_sample_size = min(500000, len(dataset["test"]))  # Will be 498 in your case
-seed = 42
-# Downsample safely
-dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_sample_size))
-dataset["test"] = dataset["test"].shuffle(seed=seed).select(range(test_sample_size))
 
 def tokenize_function(example):
     return tokenizer(example["text"], truncation=True, padding="max_length", max_length=128)
@@ -60,9 +48,15 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
+import time
+
+inference_start = time.time()
+
 model.eval()
 total_correct = 0
 total_samples = 0
+all_preds = []
+all_labels = []
 
 with torch.no_grad():
     for batch in test_loader:
@@ -74,13 +68,35 @@ with torch.no_grad():
         logits = outputs.logits
         predictions = torch.argmax(logits, dim=-1)
 
+        all_preds.extend(predictions.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
         total_correct += (predictions == labels).sum().item()
         total_samples += labels.size(0)
 
+inference_time = time.time() - inference_start
 accuracy = total_correct / total_samples
-print(f"Test Accuracy: {accuracy:.4f}")
+print(f"\nTest Accuracy: {accuracy:.4f}")
+print(f"Inference Time: {inference_time:.2f}s")
+print("\nClassification Report:")
+print(classification_report(all_labels, all_preds, target_names=["Negative", "Positive"]))
+
+"""DOWNSAMPLING FOR TRAINING"""
+
+from datasets import DatasetDict
+
+# Shuffle and select the first N examples (e.g., 10%)
+sample_fraction = 0.1
+num_samples = int(sample_fraction * len(train_dataset))
+train_dataset_small = train_dataset.shuffle(seed=42).select(range(num_samples))
+len(train_dataset_small)
+
+train_loader = DataLoader(train_dataset_small, batch_size=16, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=16)
 
 num_epochs = 3
+
+total_train_start = time.time()
 
 for epoch in range(num_epochs):
     model.train()
@@ -104,9 +120,17 @@ for epoch in range(num_epochs):
     avg_loss = running_loss / len(train_loader)
     print(f"Epoch {epoch+1}/{num_epochs} - Loss: {avg_loss:.4f}")
 
+
+total_train_time = time.time() - total_train_start
+print(f"Total Training Time: {total_train_time:.2f}s")
+
 model.eval()
 total_correct = 0
 total_samples = 0
+all_preds = []
+all_labels = []
+
+inference_start = time.time()
 
 with torch.no_grad():
     for batch in test_loader:
@@ -118,8 +142,20 @@ with torch.no_grad():
         logits = outputs.logits
         predictions = torch.argmax(logits, dim=-1)
 
+        all_preds.extend(predictions.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
         total_correct += (predictions == labels).sum().item()
         total_samples += labels.size(0)
 
+inference_time = time.time() - inference_start
 accuracy = total_correct / total_samples
-print(f"Test Accuracy: {accuracy:.4f}")
+print(f"\nTest Accuracy: {accuracy:.4f}")
+print(f"Inference Time: {inference_time:.2f}s")
+print("\nClassification Report:")
+print(classification_report(all_labels, all_preds, target_names=["Negative", "Positive"]))
+
+if torch.cuda.is_available():
+    max_memory = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+    print(f"Max GPU memory used: {max_memory:.2f} MB")
+
